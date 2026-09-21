@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eval-ai-library"
-version = "0.7.24"
+version = "0.7.26"
 description = "Comprehensive AI Model Evaluation Framework with support for multiple LLM providers"
 readme = "README.md"
 authors = [
@@ -38,7 +38,7 @@ requires-python = ">=3.9"
 dependencies = [
     # Unified LLM router — handles 100+ providers via a single API.
     # Pinned exactly: LiteLLM ships almost daily with occasional regressions.
-    "litellm==1.77.1",
+    "litellm==1.102.0",
     # OpenAI SDK — used directly by get_embeddings() (LiteLLM doesn't cover
     # embeddings in our flow) and lazy-loaded by litellm for OpenAI calls.
     "openai>=1.0.0",
@@ -83,7 +83,7 @@ tracing = [
 # Alias for the base install — kept for backward compatibility with users who
 # wrote `pip install eval-ai-library[llm]` before the 0.7.0 split.
 llm = [
-    "litellm==1.77.1",
+    "litellm==1.102.0",
     "openai>=1.0.0",
     "anthropic>=0.18.0",
     "google-genai>=0.2.0",
