@@ -49,7 +49,10 @@ class RoleAdherenceMetric(ConversationalMetricPattern):
         """
         super().__init__(model=model, threshold=threshold, verbose=verbose)
         self.temperature = temperature
-        self.role_description = chatbot_role
+        # Store on the same attribute evaluate() reads (and the parent defines),
+        # so a role set via metric settings is actually used instead of falling
+        # back to "No role specified".
+        self.chatbot_role = chatbot_role
 
     # ==================== HELPER METHODS ====================
 
