@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eval-ai-library"
-version = "0.7.27"
+version = "0.7.28"
 description = "Comprehensive AI Model Evaluation Framework with support for multiple LLM providers"
 readme = "README.md"
 authors = [

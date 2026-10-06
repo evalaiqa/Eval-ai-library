@@ -72,7 +72,8 @@ class ToolCorrectnessMetric(MetricPattern):
             return self.calculate_exact_match_score()
         elif self.check_ordering:
             _, score = self.compute_weighted_lcs()
-            return score / len(self.expected_tools) if self.expected_tools else 0.0
+            # No tools expected => nothing to order, requirement trivially met.
+            return score / len(self.expected_tools) if self.expected_tools else 1.0
         else:
             return self.calculate_non_exact_match_score()
 
@@ -95,7 +96,10 @@ class ToolCorrectnessMetric(MetricPattern):
                     match_count += 1
                     used.add(i)
                     break
-        return match_count / len(self.expected_tools) if self.expected_tools else 0.0
+        # No tools were expected => the agent correctly needed none, score 1.0.
+        # (Extra calls are not penalised in non-exact mode; use exact_match=True
+        # if calling tools when none are expected should fail.)
+        return match_count / len(self.expected_tools) if self.expected_tools else 1.0
 
     def compute_weighted_lcs(self):
         m, n = len(self.expected_tools), len(self.tools_called)
