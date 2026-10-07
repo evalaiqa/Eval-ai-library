@@ -31,6 +31,7 @@ import litellm
 import openai
 
 from .model_catalog import get_cost_per_million
+from .utils import JUDGE_SEED
 
 # Make LiteLLM behave: silence its noisy loggers, drop unknown params instead of
 # erroring (different providers accept different sets of options), and disable
@@ -324,12 +325,21 @@ async def _litellm_chat_complete(
     Precedence rules:
         - explicit kwargs > _to_litellm_args(llm) (e.g. Zhipu's api_key)
         - explicit kwargs > LiteLLM env-var lookup
+        - explicit extra_kwargs["seed"] > the default JUDGE_SEED applied at temperature 0
     """
     args = _to_litellm_args(llm)
     if api_key is not None:
         args["api_key"] = api_key
     if api_base is not None:
         args["api_base"] = api_base
+    # Deterministic judge calls: every call made at temperature 0 gets a fixed
+    # seed, so identical inputs reproduce the same output as far as the
+    # provider allows (OpenAI: best-effort). Calls that sample on purpose
+    # (temperature > 0: G-Eval, CustomEval with n_runs > 1, the data generator)
+    # are left alone, and an explicit extra_kwargs["seed"] still wins via the
+    # update() below. LiteLLM drops the param for providers that lack it.
+    if temperature == 0:
+        args.setdefault("seed", JUDGE_SEED)
     if extra_kwargs:
         args.update(extra_kwargs)
 

@@ -12,7 +12,7 @@ from math import exp
 from eval_lib.testcases_schema import EvalTestCase
 from eval_lib.metric_pattern import MetricPattern
 from eval_lib.llm_client import chat_complete
-from eval_lib.utils import score_agg, extract_json_block
+from eval_lib.utils import score_agg, extract_json_block, split_into_statements
 
 # Constants for verdict weights
 VERDICT_WEIGHTS = {
@@ -23,11 +23,19 @@ VERDICT_WEIGHTS = {
     "none": 0.0      # Not related
 }
 
-# Statement types produced by the verdict step. Non-claims (offers, questions,
-# calls to action, pleasantries) are kept in the log but excluded from the
-# score. A missing/unknown type defaults to a scored claim, preserving
-# backward compatibility with judge replies that do not emit a type.
-EXCLUDED_TYPES = {"non_claim"}
+# Statement types produced by the verdict step, kept in the log but excluded
+# from the score:
+#   non_claim    - pure pleasantries / meta-comments with no content about the
+#                  user's goal ("Sure!", "Happy to help!"). Requests to the
+#                  user, clarifying questions, verification steps and offers to
+#                  perform the requested action are scored claims, floored at
+#                  "partial" in the verdict prompt: a reasonable step toward
+#                  the goal is relevant, and excluding them left
+#                  clarification-type answers with nothing to score.
+#   not_in_answer - a statement not actually present in the answer.
+# A missing/unknown type defaults to a scored claim, preserving backward
+# compatibility with judge replies that do not emit a type.
+EXCLUDED_TYPES = {"non_claim", "not_in_answer"}
 
 
 def _is_scored(verdict: Dict[str, Any]) -> bool:
@@ -58,36 +66,31 @@ class AnswerRelevancyMetric(MetricPattern):
         return response.strip(), cost or 0.0
 
     async def _generate_statements(self, intent: str, answer: str) -> Tuple[List[str], float]:
-        prompt = (
-            "Extract the key factual claims from the following answer.\n\n"
-            f"User intent: {intent}\n\n"
-            f"Answer:\n{answer}\n\n"
-            "Rules:\n"
-            "- Each claim must be a single, verifiable statement.\n"
-            "- Ignore greetings, meta-comments, disclaimers, and offers to help.\n"
-            "- Do NOT split one sentence into micro-facts. Keep claims at sentence-level.\n"
-            "- Include both relevant AND irrelevant statements.\n"
-            "- Maximum 8 claims. Focus on the most substantive facts.\n"
-            "- Output as a JSON array of strings."
-        )
-        text, cost = await chat_complete(self.model, [{"role": "user", "content": prompt}], temperature=0.0)
-        try:
-            raw_json = extract_json_block(text)
-            statements = json.loads(raw_json)
-            assert isinstance(statements, list)
-            return statements, cost or 0.0
-        except Exception as e:
-            raise RuntimeError(f"Failed to parse statements: {e}\n{text}")
+        """Deterministic sentence-level statements (no LLM call).
 
-    async def _generate_verdicts(self, question: str, intent: str, statements: List[str]) -> Tuple[List[Dict[str, str]], float, float]:
-        """Single-step verdict with improved prompt for relevancy."""
+        The answer is split into sentences by `split_into_statements`, so the
+        statement set is identical on every run and structurally parallel
+        across near-identical answers. This removes the extraction step's
+        run-to-run variance (different counts/splits => different denominators
+        and none-fractions). Non-claims and statements not in the answer are
+        still filtered by type in the verdict step. `intent` is kept for
+        signature compatibility.
+        """
+        return split_into_statements(answer), 0.0
+
+    async def _generate_verdicts(self, question: str, intent: str, answer: str, statements: List[str]) -> Tuple[List[Dict[str, str]], float, float]:
+        """Single-step classify-and-verdict for relevancy."""
         prompt = (
             "You are an impartial evaluator.\n\n"
             "Step 1 - classify each statement:\n"
-            "- non_claim: an offer, question, call to action, or pleasantry "
-            "(e.g. \"share your order ID and I can check\"). Use the verdict \"n/a\"; "
-            "it is excluded from scoring.\n"
-            "- claim: anything else. Give it a verdict below.\n\n"
+            "- not_in_answer: the statement is NOT actually asserted in the ANSWER below "
+            "(it was invented or over-generalized). Use the verdict \"n/a\"; excluded from scoring.\n"
+            "- non_claim: a pure pleasantry or meta-comment with no content about the user's goal "
+            "(\"Sure!\", \"Happy to help!\", \"Let me know if you need anything else\"). "
+            "Use the verdict \"n/a\"; excluded from scoring.\n"
+            "- claim: anything else actually present in the answer, INCLUDING a request for "
+            "information, a clarifying question, a verification step, or an offer to perform the "
+            "requested action. Give it a verdict below.\n\n"
             "Step 2 - for each claim, decide how directly it fulfils the user intent "
             "using the 5-level scale:\n"
             "- fully: Explicitly answers the intent with concrete information (examples count as fully).\n"
@@ -98,15 +101,20 @@ class AnswerRelevancyMetric(MetricPattern):
             "Key distinctions:\n"
             "- Examples and concrete details that illustrate the answer = \"fully\" (not \"mostly\").\n"
             "- Background context that helps understand the answer = \"mostly\" (not \"partial\").\n"
+            "- A request for information, a clarifying question, a verification step, or an offer to "
+            "perform the requested action that is a reasonable step toward the user's goal "
+            "(e.g. asking for the account email in order to apply a discount code) is at least "
+            "\"partial\" - never \"minor\" or \"none\".\n"
             "- A true, on-topic detail about the SAME entity the user asked about "
             "(e.g. the specific order's items, total, or note when the user asked about that order) "
             "is at least \"minor\" - never \"none\" - even if it does not address the exact aspect asked.\n"
             "- Use \"none\" ONLY for statements about a DIFFERENT entity or completely unrelated to the question.\n\n"
             f"USER INTENT: {intent}\n\n"
             f"USER QUESTION:\n{question}\n\n"
+            f"ANSWER:\n{answer}\n\n"
             f"STATEMENTS (JSON array):\n{json.dumps(statements, ensure_ascii=False)}\n\n"
             "Return only a JSON array of objects:\n"
-            '[{"type": "claim|non_claim", "verdict": "fully|mostly|partial|minor|none|n/a", "reason": "<one sentence>"}]'
+            '[{"type": "claim|non_claim|not_in_answer", "verdict": "fully|mostly|partial|minor|none|n/a", "reason": "<one sentence>"}]'
         )
         text, cost = await chat_complete(self.model, [{"role": "user", "content": prompt}], temperature=0.0)
         raw_json = extract_json_block(text)
@@ -166,9 +174,11 @@ class AnswerRelevancyMetric(MetricPattern):
         statements, cost = await self._generate_statements(intent, answer)
         llm_cost += cost
 
-        # Step 3: Generate verdicts for each statement (non-claims excluded,
-        #         on-topic entity details floored at "minor" inside the step)
-        verdicts, verdict_score, cost = await self._generate_verdicts(question, intent, statements)
+        # Step 3: Generate verdicts for each statement. The answer is passed so
+        #         statements absent from it are flagged; non-claims (offers,
+        #         requests to the user, clarifying/verification steps) are
+        #         excluded, and on-topic entity details are floored at "minor".
+        verdicts, verdict_score, cost = await self._generate_verdicts(question, intent, answer, statements)
         llm_cost += cost
 
         # Step 4: Summarize the verdict reasons
@@ -190,8 +200,10 @@ class AnswerRelevancyMetric(MetricPattern):
             "verdicts": verdicts,
             "comment_verdicts": (
                 "Each verdict gives the statement type and its relevance to the question. "
-                "Statements typed non_claim (offers, questions, calls to action) are excluded "
-                "from the score; on-topic details about the asked-about entity are floored at 'minor'."
+                "Statements typed non_claim (pure pleasantries) or not_in_answer (not actually "
+                "stated in the answer) are excluded from the score. Requests to the user, "
+                "clarifying questions and verification steps are scored and floored at 'partial'; "
+                "on-topic details about the asked-about entity are floored at 'minor'."
             ),
             "scored_statement_count": sum(1 for v in verdicts if _is_scored(v)),
             "comment_scored_statement_count": "Number of claim statements that counted toward the score.",

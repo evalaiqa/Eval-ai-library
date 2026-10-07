@@ -12,6 +12,59 @@ Utility functions for metrics evaluation
 """
 
 
+# Fixed seed applied centrally in llm_client._litellm_chat_complete to every
+# call made at temperature 0 (i.e. every judge call), so identical inputs get
+# as reproducible an output as the provider allows. Calls that sample on
+# purpose (temperature > 0: G-Eval, CustomEval with n_runs > 1, the data
+# generator) are left alone, and an explicit `extra_kwargs={"seed": ...}`
+# overrides it. OpenAI treats seed as best-effort; LiteLLM drops it for
+# providers that do not support it (litellm.drop_params=True); the native
+# helpers (Ollama, MLX, custom clients) never see it.
+JUDGE_SEED = 42
+
+# Upper bound on statements per answer; bounds judge-prompt size and cost.
+MAX_STATEMENTS = 12
+
+_MD_EMPHASIS = re.compile(r"(\*\*|__|\*|`)")
+_LINE_LIST_MARKER = re.compile(r"^(?:\d{1,2}[.)]|[-*•])\s+")
+_INLINE_ENUM = re.compile(r"(?<=\s)\d{1,2}\)\s+")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
+
+
+def split_into_statements(text: str, max_statements: int = MAX_STATEMENTS) -> List[str]:
+    """Deterministically split an answer into sentence-level statements.
+
+    Replaces LLM-based claim extraction for the metrics that score a
+    proportion of statements (Faithfulness, AnswerRelevancy). The LLM
+    extractor returned a different number/split of claims on every run, which
+    changed the denominator and the none-fraction and was the dominant source
+    of score spread between runs. A deterministic split yields the identical
+    statement set on every run and structurally parallel sets for
+    near-identical answers. Classification of non-claims / restatements still
+    happens in the verdict step.
+
+    Normalisation: markdown emphasis is stripped, a list marker at the start of
+    a line is dropped (the line break already separates it), an inline
+    enumeration such as "1) ... 2) ..." is flattened into its sentence, and
+    whitespace is collapsed. Then each line is split on sentence-ending
+    punctuation. Fragments shorter than 3 characters are dropped and the result
+    is capped at `max_statements`.
+    """
+    if not text:
+        return []
+    cleaned = _MD_EMPHASIS.sub("", text).replace("\r", "\n")
+    statements: List[str] = []
+    for line in cleaned.split("\n"):
+        line = _LINE_LIST_MARKER.sub("", line.strip())
+        line = _INLINE_ENUM.sub(" ", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        statements.extend(s.strip() for s in _SENTENCE_END.split(line) if s.strip())
+    statements = [s for s in statements if len(s) >= 3]
+    return statements[:max_statements]
+
+
 def _map_temperature_to_p(
     temperature: float,
     t_min: float = 0.1,
@@ -48,6 +101,12 @@ def score_agg(
     where alpha = 1.5 at low T (strict) and 0.5 at high T (lenient).
     This avoids double-punishing "none" verdicts that already pull
     the power mean down.
+
+    The penalty strength is additionally scaled by the number of scores,
+    ramping in linearly and reaching full strength at n >= 5. With only 2-4
+    scores a single "none" (none_frac = 0.5 at n=2) would otherwise swing the
+    result across a pass threshold, turning one borderline verdict into a
+    pass/fail flip between runs. Larger sets keep the original behaviour.
     """
     if not scores:
         return 0.0
@@ -71,7 +130,9 @@ def score_agg(
     # alpha depends on temperature: strict T → higher alpha (harsher), lenient T → lower alpha (softer)
     n = len(scores)
     none_frac = sum(1 for s in scores if s == 0.0) / n if n > 0 else 0.0
-    alpha = 1.5 - temperature  # T=0.1 → alpha=1.4 (strict), T=0.5 → alpha=1.0, T=1.0 → alpha=0.5 (lenient)
+    # T=0.1 → alpha=1.4 (strict), T=0.5 → alpha=1.0, T=1.0 → alpha=0.5 (lenient),
+    # then scaled by n: 0 at n=1, 1/4 at n=2, ..., full strength from n=5 up.
+    alpha = (1.5 - temperature) * min(1.0, (n - 1) / 4.0)
     penalty_factor = (1.0 - none_frac) ** alpha
 
     return round(agg * penalty_factor, 4)

@@ -12,7 +12,7 @@ from math import exp
 from eval_lib.testcases_schema import EvalTestCase
 from eval_lib.metric_pattern import MetricPattern
 from eval_lib.llm_client import chat_complete
-from eval_lib.utils import score_agg, extract_json_block
+from eval_lib.utils import score_agg, extract_json_block, split_into_statements
 
 VERDICT_WEIGHTS = {
     "fully": 1.0,
@@ -39,6 +39,52 @@ def _is_scored(verdict: Dict[str, Any]) -> bool:
     return _statement_type(verdict) not in EXCLUDED_TYPES
 
 
+_TOKEN = re.compile(r"[a-z0-9]{3,}")
+
+
+def _support_grounded(support: str, context: str, min_overlap: float = 0.6) -> bool:
+    """True when the judge's support quote is actually drawn from the context.
+
+    The prompt asks for exact context sentence(s), but a drifting judge
+    occasionally backs an unsupported claim with an invented or paraphrased
+    quote and labels it "fully". Requiring that most of the quote's content
+    tokens occur in the context catches invented support while tolerating
+    light rewording (case, punctuation, dashes). This keeps the score robust
+    to judge drift instead of relying on the judge being deterministic.
+    """
+    quote_tokens = set(_TOKEN.findall(support.lower()))
+    if not quote_tokens:
+        return False
+    context_tokens = set(_TOKEN.findall(context.lower()))
+    return len(quote_tokens & context_tokens) / len(quote_tokens) >= min_overlap
+
+
+# What a genuine non-claim looks like: an offer by the assistant, a question or
+# request addressed to the user, or a pleasantry. Exclusion from scoring is the
+# risky direction (a hallucinated procedure that slips out as "non_claim" is
+# never checked), so the judge's non_claim label is only honoured when the
+# sentence matches one of these shapes; otherwise it is demoted to a scored
+# fact and goes through the normal support check.
+_NON_CLAIM_PATTERNS = re.compile(
+    r"(?:"
+    r"\?\s*$"                                                   # a question to the user
+    r"|\bi(?:'ll|'d|'m)\b|\b(?:i|we)\s+(?:can|could|will|would|am|are)\b"  # assistant offer
+    r"|\blet me\b|\bfeel free\b|\bhappy to help\b|\bglad to help\b"
+    r"|\b(?:share|send|tell|give|provide|confirm|let)\s+(?:me|us)\b"      # give the assistant something
+    r"|\b(?:share|send|provide|enter|confirm)\s+(?:your|the)\s+"
+    r"(?:order\s+id|order\s+number|email|account|card|last\s+4|details?)\b"
+    r"|\bif you\s+(?:tell|share|send|give|provide)\b"
+    r"|\bplease\s+(?:share|send|provide|tell|let|confirm|enter)\b"
+    r"|\b(?:thanks|thank you|you're welcome)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_non_claim(statement: str) -> bool:
+    return bool(_NON_CLAIM_PATTERNS.search((statement or "").strip()))
+
+
 class FaithfulnessMetric(MetricPattern):
     name = "faithfulnessMetric"
     requires_actual_output = True
@@ -54,23 +100,16 @@ class FaithfulnessMetric(MetricPattern):
         self.temperature = temperature
 
     async def _generate_statements(self, answer: str) -> Tuple[List[str], float]:
-        prompt = (
-            "Extract the key factual claims from the following answer.\n\n"
-            "Rules:\n"
-            "- Each claim must be a single, verifiable factual statement.\n"
-            "- Ignore greetings, meta-comments (\"Sure!\", \"Here's...\"), stylistic phrases, "
-            "and offers/questions/calls to action (\"share your order ID and I can check\").\n"
-            "- Do NOT split one sentence into micro-facts. Keep claims at sentence-level granularity.\n"
-            "- Combine closely related details into one claim rather than listing separately.\n"
-            "- Maximum 8 claims. Focus on the most important facts.\n\n"
-            f"Answer:\n{answer}\n\n"
-            "Return a JSON array of strings."
-        )
-        text, cost = await chat_complete(self.model, [{"role": "user", "content": prompt}], temperature=0.0)
-        raw_json = extract_json_block(text)
-        statements = json.loads(raw_json)
-        assert isinstance(statements, list)
-        return statements, cost or 0.0
+        """Deterministic sentence-level statements (no LLM call).
+
+        The answer is split into sentences by `split_into_statements`, so the
+        statement set is identical on every run. This removes the extraction
+        step's run-to-run variance (different counts/splits => different
+        denominators and none-fractions), which was the dominant source of
+        score spread. Non-claims and restatements are still filtered by type
+        in the verdict step.
+        """
+        return split_into_statements(answer), 0.0
 
     async def _generate_verdicts(self, context: str, question: str, statements: List[str]) -> Tuple[List[Dict[str, str]], float, float]:
         """Single-step classify-and-verdict.
@@ -97,8 +136,13 @@ class FaithfulnessMetric(MetricPattern):
             "question's fact.\n"
             "- input_restatement: only repeats information from the QUESTION and asserts nothing "
             "about the CONTEXT. (Excluded from scoring.)\n"
-            "- non_claim: an offer, question, call to action, or pleasantry "
-            "(e.g. \"share your order ID and I can check the details\"). (Excluded from scoring.)\n\n"
+            "- non_claim: ONLY an offer by the assistant, a question or request addressed to the user, "
+            "or a pleasantry - a sentence that asserts nothing about the domain "
+            "(e.g. \"share your order ID and I can check the details\"). (Excluded from scoring.)\n"
+            "  An instruction or description of how a process works (e.g. \"start the return by "
+            "confirming the item and giving a reason\", \"follow the shipping instructions\") "
+            "asserts facts about that process: it is a fact, NOT a non_claim, and must be checked "
+            "against the CONTEXT like any other claim.\n\n"
             "Step 2 - for fact and inference, find the relevant context passage, then assign a verdict:\n"
             "- fully: The core meaning is clearly present in the context (exact wording NOT required).\n"
             "- mostly: The main idea is supported but with minor differences in details "
@@ -111,7 +155,12 @@ class FaithfulnessMetric(MetricPattern):
             "Key distinctions:\n"
             "- Paraphrasing or using synonyms = \"fully\" (not \"mostly\").\n"
             "- Missing exact numbers/dates but correct overall = \"mostly\" (not \"partial\" or \"none\").\n"
-            "- Use \"none\" ONLY when the context contradicts the claim or has zero relevant information.\n\n"
+            "- Use \"none\" when the context contradicts the claim or has zero relevant information.\n"
+            "- A verdict of fully/mostly/partial/minor REQUIRES a supporting quote from the CONTEXT "
+            "(for an inference, quote the CONTEXT premise it relies on). If you cannot quote supporting "
+            "context, the verdict MUST be \"none\".\n"
+            "- Keep reason and verdict consistent: never say the context does not mention or support the "
+            "claim while giving a verdict other than \"none\".\n\n"
             f"CONTEXT:\n{context}\n\n"
             f"QUESTION:\n{question}\n\n"
             f"STATEMENTS (JSON array):\n{json.dumps(statements, ensure_ascii=False)}\n\n"
@@ -125,14 +174,34 @@ class FaithfulnessMetric(MetricPattern):
         raw_json = extract_json_block(text)
         verdicts: List[Dict[str, Any]] = json.loads(raw_json)
 
-        # Safety check: a plain fact claimed as fully/mostly but with no supporting
-        # passage is downgraded. Inferences legitimately may not quote a single
-        # passage, so they are exempt.
+        # Conservative exclusion: honour a non_claim label only for sentences
+        # that look like an offer / question / pleasantry. A procedural
+        # instruction the judge tags non_claim (it flips on this even with a
+        # seed) is demoted to a scored fact; with no context support it then
+        # becomes "none" below, instead of silently dropping out of the score.
+        if len(verdicts) == len(statements):
+            for stmt, v in zip(statements, verdicts):
+                if _statement_type(v) == "non_claim" and not _looks_like_non_claim(stmt):
+                    v["type"] = "fact"
+                    if (v.get("verdict") or "").strip().lower() in ("n/a", ""):
+                        v["verdict"] = "none"
+
+        # Support-quote enforcement: a scored statement cannot carry a verdict
+        # better than "none" without a supporting quote that is actually drawn
+        # from the context. This removes the reason/verdict contradiction (a
+        # "partial" whose reason says the context does not mention the claim),
+        # the none/partial flip on the same unsupported claim, and the drift
+        # mode where the judge backs an unsupported claim with an invented
+        # quote. Excluded statements (restatements, non-claims) are untouched.
         for v in verdicts:
-            if _statement_type(v) == "fact":
-                supp = (v.get("support") or "").strip().lower()
-                if supp in ("none", "") and v.get("verdict") in ("fully", "mostly"):
-                    v["verdict"] = "partial"
+            if not _is_scored(v):
+                continue
+            supp = (v.get("support") or "").strip()
+            verdict = (v.get("verdict") or "").strip().lower()
+            if verdict not in ("fully", "mostly", "partial", "minor"):
+                continue
+            if supp.lower() in ("none", "") or not _support_grounded(supp, context):
+                v["verdict"] = "none"
 
         scored = [v for v in verdicts if _is_scored(v)]
         scores = [VERDICT_WEIGHTS.get((v.get("verdict") or "").strip().lower(), 0.0) for v in scored]

@@ -80,7 +80,12 @@ class ContextualRelevancyMetric(MetricPattern):
             "- mostly: addresses the question well and covers most of the user's intent with minor gaps\n"
             "- partial: partially relevant to the question or intent but missing key information\n"
             "- minor: tangentially related to either the question or intent\n"
-            "- none: not relevant to the question or user's intent"
+            "- none: not relevant to the question or user's intent\n\n"
+            "Key rule:\n"
+            "- A segment that is about the SAME entity the user asked about but does not directly "
+            "answer the question (e.g. the order's delivery note when the question is that order's "
+            "status) is at least \"minor\" - never \"none\".\n"
+            "- Use \"none\" ONLY for a segment about a DIFFERENT entity or completely unrelated to the question."
         )
         resp, cost = await chat_complete(
             self.model,
