@@ -23,6 +23,16 @@ VERDICT_WEIGHTS = {
     "none": 0.0      # Not related
 }
 
+# Statement types produced by the verdict step. Non-claims (offers, questions,
+# calls to action, pleasantries) are kept in the log but excluded from the
+# score. A missing/unknown type defaults to a scored claim, preserving
+# backward compatibility with judge replies that do not emit a type.
+EXCLUDED_TYPES = {"non_claim"}
+
+
+def _is_scored(verdict: Dict[str, Any]) -> bool:
+    return (verdict.get("type") or "claim").strip().lower() not in EXCLUDED_TYPES
+
 
 class AnswerRelevancyMetric(MetricPattern):
     name = "answerRelevancyMetric"
@@ -73,7 +83,12 @@ class AnswerRelevancyMetric(MetricPattern):
         """Single-step verdict with improved prompt for relevancy."""
         prompt = (
             "You are an impartial evaluator.\n\n"
-            "For every statement below, decide how directly it fulfils the user intent "
+            "Step 1 - classify each statement:\n"
+            "- non_claim: an offer, question, call to action, or pleasantry "
+            "(e.g. \"share your order ID and I can check\"). Use the verdict \"n/a\"; "
+            "it is excluded from scoring.\n"
+            "- claim: anything else. Give it a verdict below.\n\n"
+            "Step 2 - for each claim, decide how directly it fulfils the user intent "
             "using the 5-level scale:\n"
             "- fully: Explicitly answers the intent with concrete information (examples count as fully).\n"
             "- mostly: Clearly supports the intent; small details may be missing.\n"
@@ -83,18 +98,24 @@ class AnswerRelevancyMetric(MetricPattern):
             "Key distinctions:\n"
             "- Examples and concrete details that illustrate the answer = \"fully\" (not \"mostly\").\n"
             "- Background context that helps understand the answer = \"mostly\" (not \"partial\").\n"
-            "- Use \"none\" ONLY for statements completely unrelated to the question.\n\n"
+            "- A true, on-topic detail about the SAME entity the user asked about "
+            "(e.g. the specific order's items, total, or note when the user asked about that order) "
+            "is at least \"minor\" - never \"none\" - even if it does not address the exact aspect asked.\n"
+            "- Use \"none\" ONLY for statements about a DIFFERENT entity or completely unrelated to the question.\n\n"
             f"USER INTENT: {intent}\n\n"
             f"USER QUESTION:\n{question}\n\n"
             f"STATEMENTS (JSON array):\n{json.dumps(statements, ensure_ascii=False)}\n\n"
             "Return only a JSON array of objects:\n"
-            '[{"verdict": "fully|mostly|partial|minor|none", "reason": "<one sentence>"}]'
+            '[{"type": "claim|non_claim", "verdict": "fully|mostly|partial|minor|none|n/a", "reason": "<one sentence>"}]'
         )
         text, cost = await chat_complete(self.model, [{"role": "user", "content": prompt}], temperature=0.0)
         raw_json = extract_json_block(text)
         verdicts = json.loads(raw_json)
 
-        scores = [VERDICT_WEIGHTS.get(v.get("verdict", "").lower(), 0.0) for v in verdicts]
+        scored = [v for v in verdicts if _is_scored(v)]
+        scores = [VERDICT_WEIGHTS.get((v.get("verdict") or "").strip().lower(), 0.0) for v in scored]
+        # No scorable claims (e.g. the answer is only an offer to help)
+        # => nothing substantive addressed the question.
         verdict_score = round(score_agg(scores, temperature=self.temperature), 4) if scores else 0.0
         return verdicts, verdict_score, cost or 0.0
 
@@ -105,7 +126,7 @@ class AnswerRelevancyMetric(MetricPattern):
 
         grouped: Dict[str, List[str]] = {}
         for v in verdicts:
-            grouped.setdefault(v["verdict"], []).append(v["reason"])
+            grouped.setdefault(v.get("verdict", ""), []).append(v.get("reason", ""))
 
         bullets: List[str] = []
         for tag in ("fully", "mostly", "partial", "minor", "none"):
@@ -145,23 +166,20 @@ class AnswerRelevancyMetric(MetricPattern):
         statements, cost = await self._generate_statements(intent, answer)
         llm_cost += cost
 
-        # Step 3: Generate verdicts for each statement
-        verdicts, _, cost = await self._generate_verdicts(question, intent, statements)
+        # Step 3: Generate verdicts for each statement (non-claims excluded,
+        #         on-topic entity details floored at "minor" inside the step)
+        verdicts, verdict_score, cost = await self._generate_verdicts(question, intent, statements)
         llm_cost += cost
-
-        weights = [VERDICT_WEIGHTS[v["verdict"]] for v in verdicts]
-        verdict_score = round(
-            score_agg(weights, temperature=self.temperature), 4)
 
         # Step 4: Summarize the verdict reasons
         summary_reason, cost = await self._summarize_reasons_via_llm(verdicts)
         llm_cost += cost
 
-        # Step 4: Count final score based on verdicts
+        # Step 5: Count final score based on verdicts
         final_score = verdict_score
         success = final_score >= self.threshold
 
-        # Step 5: Verbose log
+        # Step 6: Verbose log
         evaluation_log = {
             "input_question": question,
             "answer": answer,
@@ -170,7 +188,13 @@ class AnswerRelevancyMetric(MetricPattern):
             "statements": statements,
             "comment_statements": "Atomic facts extracted from the answer.",
             "verdicts": verdicts,
-            "comment_verdicts": "Each verdict explains whether a statement is relevant to the question.",
+            "comment_verdicts": (
+                "Each verdict gives the statement type and its relevance to the question. "
+                "Statements typed non_claim (offers, questions, calls to action) are excluded "
+                "from the score; on-topic details about the asked-about entity are floored at 'minor'."
+            ),
+            "scored_statement_count": sum(1 for v in verdicts if _is_scored(v)),
+            "comment_scored_statement_count": "Number of claim statements that counted toward the score.",
             "verdict_score": verdict_score,
             "comment_verdict_score": "Proportion of relevant statements in the answer.",
             "final_score": final_score,
