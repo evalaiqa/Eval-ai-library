@@ -5,11 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+Entries before 0.8.0 were reconstructed from the git history, so older ones are
+summarised from their commit messages rather than written at release time.
+
 ## [Unreleased]
 
 ## [0.8.0] - 2026-10-21
 
-Custom Eval calibration — library-side core (Phase 1). Additions only; existing
+Custom Eval calibration — library-side core. Additions only; existing
 `CustomEvalMetric` and every other metric behave exactly as before. With no
 few-shot examples the CustomEval judge prompt and result are byte-for-byte
 identical to 0.7.30.
@@ -78,5 +81,278 @@ run = await evaluate_config(config, labeled_cases, "openai:gpt-4o-mini",
                             budget=Budget(max_llm_calls=500))
 ```
 
+## [0.7.30] - 2026-10-07
+
+### Added
+- `AnswerRelevancyMetric` and `ContextualRelevancyMetric`.
+
+### Changed
+- Optimized RAG metrics; improved `utils.py` scoring and penalty calculation.
+- Fixed `JUDGE_SEED` applied to judge calls for reproducibility.
+
+### Fixed
+- Faithfulness / AnswerRelevancy scoring on equivalent answers: the verdict step
+  now classifies statements and excludes input-restatements and non-claims
+  (offers / CTA); Faithfulness sees the user input; AnswerRelevancy floors
+  on-topic entity details at "minor".
+
+## [0.7.28] - 2026-10-06
+
+### Fixed
+- Tool correctness metric evaluation for RAG systems and AI agents.
+
+## [0.7.27] - 2026-09-28
+
+### Fixed
+- Role adherence metric calculation.
+
+## [0.7.26] - 2026-09-21
+
+### Changed
+- Updated the LiteLLM dependency to pick up new providers and improvements.
+
+## [0.7.25] - 2026-09-08
+
+### Added
+- Expanded the restricted-refusal metric and registered the new metrics in the
+  metric registry.
+
+## [0.7.24] - 2026-09-06
+
+### Added
+- Harmful-content detection security metric (Hugging Face classifier).
+
+### Fixed
+- Double counting of errors in `tools_error_metric`; accuracy/performance of the
+  existing security metrics.
+
+## [0.7.23] - 2026-09-06
+
+### Added
+- Security metrics for harmful content, jailbreak, and prompt-injection detection.
+
+### Fixed
+- Local model evaluation.
+
+## [0.7.22] - 2026-09-05
+
+### Fixed
+- Tracing module import error (`ImportError`) from incorrect imports in the
+  `eval_lib` / `eval_lib.tracing` package `__init__` files.
+
+## [0.7.21] - 2026-09-05
+
+### Fixed
+- Tracing callbacks not being registered in some environments; added logging for
+  debugging.
+
+## [0.7.20] - 2026-09-02
+
+### Added
+- Support for new metrics in the bias metric.
+
+### Fixed
+- JSON parsing in the toxicity metric.
+
+## [0.7.19] - 2026-08-27
+
+### Changed
+- Documentation update and minor fixes.
+
+## [0.7.17] - 2026-08-26
+
+### Added
+- Additional custom metrics.
+
+## [0.7.16] - 2026-08-22
+
+### Fixed
+- Dataset parser.
+
+## [0.7.15] - 2026-07-10
+
+### Added
+- User id and session on traces.
+
+## [0.7.14] - 2026-07-09
+
+### Changed
+- Tracing updates.
+
+## [0.7.13] - 2026-05-22
+
+### Security
+- Small security fix.
+
+## [0.7.12] - 2026-05-20
+
+### Changed
+- Maintenance and version bump.
+
+## [0.7.11] - 2026-05-20
+
+### Fixed
+- Bug in the custom evaluation metric.
+
+## [0.7.10] - 2026-05-20
+
+### Added
+- Custom field in custom metrics.
+
+## [0.7.9] - 2026-05-19
+
+### Added
+- Multi custom-metric support.
+
+## [0.7.5] - 2026-04-17
+
+### Added
+- Reliability metrics, `trace_utils`, and framework tracers (merge of the
+  agents_evaluation work).
+
+## [0.7.4] - 2026-04-15
+
+### Changed
+- Maintenance and version bump.
+
+## [0.7.3] - 2026-04-15
+
+### Changed
+- Maintenance and version bump.
+
+## [0.7.2] - 2026-04-14
+
+### Changed
+- Version bump.
+
+## [0.7.1] - 2026-04-14
+
+### Added
+- Conversational-flow, failure-rate, goal-achievement, and repetitive-pattern
+  metrics; LiteLLM integration.
+
+### Changed
+- Updated the task-success and security metrics.
+
+## [0.5.4] - 2026-04-01
+
+### Added
+- New agent metrics and tracing capabilities.
+
+## [0.5.3] - 2026-03-23
+
+### Added
+- JSON schema validation for evaluation results.
+
+## [0.5.2] - 2026-03-10
+
+### Changed
+- Maintenance and version bump.
+
+## [0.5.1] - 2026-03-07
+
+### Changed
+- Maintenance and version bump.
+
+## [0.4.40] - 2026-01-22
+
+### Changed
+- Maintenance and version bump.
+
+## [0.4.37] - 2025-12-10
+
+### Added
+- Tracing module.
+
+## [0.4.11] - 2025-11-19
+
+### Changed
+- Maintenance and version bump.
+
+## [0.4.6] - 2025-11-14
+
+### Changed
+- Maintenance and version bump.
+
+## [0.4.5] - 2025-11-14
+
+### Changed
+- Maintenance and version bump.
+
+## [0.4.2] - 2025-11-03
+
+### Added
+- Security metrics; `model_pricing` import.
+
+### Changed
+- Updated dependencies.
+
+## [0.3.12] - 2025-10-30
+
+### Fixed
+- Evaluation logs and CLI issues.
+
+## [0.3.9] - 2025-10-29
+
+### Added
+- CLI to start the dashboard; support for custom LLM clients.
+
+## [0.3.0] - 2025-10-23
+
+### Added
+- First stable version; temperature parameter recorded in logs.
+
+## [0.2.0] - 2025-10-22
+
+### Added
+- Initial public packaging and threshold normalization. Releases 0.2.1–0.2.32
+  were same-day packaging and dependency fixes.
+
+## [0.1.0] - 2025-10-22
+
+### Added
+- Initial release of the Eval AI Library with core functionality for evaluating
+  RAG systems and AI agents.
+
 [Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.0...HEAD
 [0.8.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.0
+[0.7.30]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.30
+[0.7.28]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.28
+[0.7.27]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.27
+[0.7.26]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.26
+[0.7.25]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.25
+[0.7.24]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.24
+[0.7.23]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.23
+[0.7.22]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.22
+[0.7.21]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.21
+[0.7.20]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.20
+[0.7.19]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.19
+[0.7.17]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.17
+[0.7.16]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.16
+[0.7.15]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.15
+[0.7.14]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.14
+[0.7.13]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.13
+[0.7.12]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.12
+[0.7.11]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.11
+[0.7.10]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.10
+[0.7.9]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.9
+[0.7.5]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.5
+[0.7.4]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.4
+[0.7.3]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.3
+[0.7.2]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.2
+[0.7.1]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.1
+[0.5.4]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.5.4
+[0.5.3]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.5.3
+[0.5.2]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.5.2
+[0.5.1]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.5.1
+[0.4.40]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.4.40
+[0.4.37]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.4.37
+[0.4.11]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.4.11
+[0.4.6]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.4.6
+[0.4.5]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.4.5
+[0.4.2]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.4.2
+[0.3.12]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.3.12
+[0.3.9]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.3.9
+[0.3.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.3.0
+[0.2.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.2.0
+[0.1.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.1.0
