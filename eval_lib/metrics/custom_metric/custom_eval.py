@@ -41,6 +41,7 @@ from eval_lib.metric_pattern import MetricPattern
 from eval_lib.testcases_schema import EvalTestCase
 from eval_lib.llm_client import chat_complete
 from eval_lib.utils import score_agg, extract_json_block
+from eval_lib.few_shot import FEW_SHOT_DEFAULT_MAX_CHARS
 
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
@@ -97,6 +98,8 @@ class CustomEvalMetric(MetricPattern):
         aggregation: str = "median",
         temperature: float = 0.8,
         verbose: bool = False,
+        few_shot_examples: Optional[List] = None,
+        few_shot_max_chars: int = FEW_SHOT_DEFAULT_MAX_CHARS,
     ):
         """
         Args:
@@ -123,8 +126,21 @@ class CustomEvalMetric(MetricPattern):
                 ≈ strict (min), 0.5 ≈ arithmetic mean, high (~1.5) ≈ lenient
                 (max). Default 0.8.
             verbose: Enable per-result console logging.
+            few_shot_examples: Optional list of FewShotExample (or dicts) shown
+                to the judge as calibration examples — how strictly the team
+                grades. Reference only; they are not scored and placeholders in
+                them are not substituted. At most 20 (ValueError otherwise).
+                Omitting them keeps the prompt identical to earlier versions.
+            few_shot_max_chars: Character budget for the whole examples block;
+                trailing examples are dropped to fit (default 12000).
         """
-        super().__init__(model=model, threshold=threshold, verbose=verbose)
+        super().__init__(
+            model=model,
+            threshold=threshold,
+            verbose=verbose,
+            few_shot_examples=few_shot_examples,
+            few_shot_max_chars=few_shot_max_chars,
+        )
 
         if not isinstance(evaluation_criteria, list) or len(evaluation_criteria) == 0:
             raise ValueError(
@@ -299,12 +315,13 @@ fully   – criterion fully satisfied"""
         kept_criteria: List[str],
         used_names: List[str],
         values: Dict[str, Any],
+        few_shot_block: str = "",
     ) -> str:
         data_block = cls._build_data_block(used_names, values)
         criteria_text = "\n".join(
             f"{i+1}. {c}" for i, c in enumerate(kept_criteria)
         )
-        return f"""{cls._prompt_label_help()}
+        return f"""{cls._prompt_label_help()}{few_shot_block}
 
 DATA:
 {data_block}
@@ -332,12 +349,13 @@ JSON:"""
         kept_criteria: List[str],
         used_names: List[str],
         values: Dict[str, Any],
+        few_shot_block: str = "",
     ) -> str:
         data_block = cls._build_data_block(used_names, values)
         criteria_text = "\n".join(
             f"{i+1}. {c}" for i, c in enumerate(kept_criteria)
         )
-        return f"""You are evaluating how well the DATA satisfies the EVALUATION CRITERIA.
+        return f"""You are evaluating how well the DATA satisfies the EVALUATION CRITERIA.{few_shot_block}
 
 DATA:
 {data_block}
@@ -374,8 +392,9 @@ JSON:"""
         kept_criteria: List[str],
         used_names: List[str],
         values: Dict[str, Any],
+        few_shot_block: str = "",
     ) -> Tuple[List[Dict[str, str]], float]:
-        prompt = self._prompt_evaluate(kept_criteria, used_names, values)
+        prompt = self._prompt_evaluate(kept_criteria, used_names, values, few_shot_block)
         text, cost = await chat_complete(
             self.model,
             messages=[{"role": "user", "content": prompt}],
@@ -403,8 +422,9 @@ JSON:"""
         kept_criteria: List[str],
         used_names: List[str],
         values: Dict[str, Any],
+        few_shot_block: str = "",
     ) -> Tuple[int, str, float]:
-        prompt = self._prompt_direct(kept_criteria, used_names, values)
+        prompt = self._prompt_direct(kept_criteria, used_names, values, few_shot_block)
         text, cost = await chat_complete(
             self.model,
             messages=[{"role": "user", "content": prompt}],
@@ -508,8 +528,9 @@ JSON:"""
         values: Dict[str, Any],
         truncation_warning: Optional[str],
     ) -> Dict[str, Any]:
+        few_shot_block, few_shot_log = self._render_few_shot("verdict")
         runs = await asyncio.gather(*[
-            self._run_verdicts_once(kept, used_names, values)
+            self._run_verdicts_once(kept, used_names, values, few_shot_block)
             for _ in range(self.n_runs)
         ])
         # runs: List[(verdicts, cost)]
@@ -603,6 +624,8 @@ JSON:"""
                 f"Individual verdicts from each of the {self.n_runs} runs before "
                 f"{self.aggregation} aggregation."
             )
+        if self.few_shot_examples:
+            evaluation_log["few_shot"] = few_shot_log
         if truncation_warning:
             evaluation_log["truncation_warning"] = truncation_warning
 
@@ -629,8 +652,9 @@ JSON:"""
         values: Dict[str, Any],
         truncation_warning: Optional[str],
     ) -> Dict[str, Any]:
+        few_shot_block, few_shot_log = self._render_few_shot("direct")
         runs = await asyncio.gather(*[
-            self._run_direct_once(kept, used_names, values)
+            self._run_direct_once(kept, used_names, values, few_shot_block)
             for _ in range(self.n_runs)
         ])
         # runs: List[(raw_score_0_10, reason, cost)]
@@ -692,6 +716,8 @@ JSON:"""
             "success": success,
             "summary": summary,
         }
+        if self.few_shot_examples:
+            evaluation_log["few_shot"] = few_shot_log
         if truncation_warning:
             evaluation_log["truncation_warning"] = truncation_warning
 

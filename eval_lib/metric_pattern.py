@@ -9,6 +9,11 @@ from typing import Type, Dict, Any, Union, Optional
 
 from eval_lib.testcases_schema import EvalTestCase, ConversationalEvalTestCase
 from eval_lib.llm_client import chat_complete
+from eval_lib.few_shot import (
+    FEW_SHOT_DEFAULT_MAX_CHARS,
+    normalize_examples,
+    render_few_shot_block,
+)
 
 
 def _is_empty_output(value: Any) -> bool:
@@ -87,10 +92,34 @@ class MetricPattern:
             if not getattr(original, "_empty_guard_wrapped", False):
                 cls.evaluate = _wrap_evaluate_with_empty_guard(original)
 
-    def __init__(self, model: str, threshold: float, verbose: bool = False):
+    def __init__(
+        self,
+        model: str,
+        threshold: float,
+        verbose: bool = False,
+        *,
+        few_shot_examples: Optional[list] = None,
+        few_shot_max_chars: int = FEW_SHOT_DEFAULT_MAX_CHARS,
+    ):
         self.model = model
         self.threshold = threshold
         self.verbose = verbose
+        # Few-shot calibration examples. Opt-in and reusable by any metric:
+        # an empty list means no behaviour change (prompts stay identical).
+        # The count limit is enforced here (ValueError) at construction time.
+        self.few_shot_examples = normalize_examples(few_shot_examples)
+        self.few_shot_max_chars = few_shot_max_chars
+
+    def _render_few_shot(self, strategy: str = "verdict") -> "tuple[str, Dict[str, Any]]":
+        """Render this metric's few-shot EXAMPLES block (+ log).
+
+        Returns ``("", log)`` when no examples are configured, so a prompt that
+        splices the block keeps its exact pre-few-shot spacing. Reusable from
+        any subclass that wants to show calibration examples to its judge.
+        """
+        return render_few_shot_block(
+            self.few_shot_examples, strategy, self.few_shot_max_chars
+        )
 
     def _empty_actual_output_result(self, test_case: "EvalTestCase") -> Dict[str, Any]:
         """Canonical zero-score result returned when actual_output is empty.
