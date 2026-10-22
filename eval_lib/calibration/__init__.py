@@ -35,6 +35,11 @@ from eval_lib.calibration.estimate import (
     estimate_evaluation,
     estimate_optimization,
 )
+from eval_lib.calibration.improve import (
+    CandidateReport,
+    ImproveResult,
+    improve,
+)
 from eval_lib.calibration.models import (
     CalibrationSet,
     CustomEvalConfig,
@@ -60,6 +65,7 @@ from eval_lib.calibration.stats import (
     criterion_attribution,
     inter_annotator,
     threshold_sweep,
+    threshold_sweep_run,
 )
 from eval_lib.few_shot import FewShotExample
 
@@ -77,6 +83,7 @@ __all__ = [
     "agreement",
     "inter_annotator",
     "threshold_sweep",
+    "threshold_sweep_run",
     "criterion_attribution",
     "AgreementReport",
     "InterAnnotatorReport",
@@ -102,6 +109,10 @@ __all__ = [
     "CalibrationOptimizer",
     "OptimizationResult",
     "CandidateResult",
+    # Small-set improve
+    "improve",
+    "ImproveResult",
+    "CandidateReport",
     # Budget
     "Budget",
     "BudgetExceeded",

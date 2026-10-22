@@ -10,6 +10,40 @@ summarised from their commit messages rather than written at release time.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-22
+
+Calibration now picks the best of several candidates and tunes the threshold on
+the scores of the config it will actually run with — fixing cases where AI
+calibration made a metric *worse* because criteria and threshold were changed
+together (the threshold had been fitted to the old scores). Additions only.
+
+### Added
+- `threshold_sweep_run(run, current, objective="accuracy")` tunes the threshold
+  on an `EvaluationRun`'s own `results[].score` / `human_verdict` pairs. It moves
+  the threshold only on a strict gain of at least one agreeing row, and the
+  `ThresholdReport` now carries `flipped` rows, `margin` to the nearest score
+  (< 0.02 ⇒ `unstable`), per-point `agree` / `n`, and a plain `rationale_text`.
+- `improve(calibration_set, learn_cases, measure_cases, model, ...)` — small-set
+  mode for the 10–30 labelled-row case. Scores the current config once
+  ("before"), runs the analyst on `learn_cases`, then builds up to four
+  candidates — **A** threshold only (no LLM), **B** criteria edits, **C** B +
+  few-shot, **D** everything else — tuning each candidate's threshold on its own
+  scores and comparing them on the rows they all share. Rows used as few-shot
+  examples are excluded from that candidate's scoring. The winner needs at least
+  one more agreeing row than "before" (ties → fewer edits, A before B), else
+  `verdict="no_improvement"` and the config is unchanged. Returns `ImproveResult`
+  (`before`, `candidates` with per-candidate agreement / threshold explanation /
+  `fixed` / `broken`, `winner`, `verdict`, `proposed_config`, `analysis`, cost).
+  `improve` applies nothing.
+
+### Changed
+- `ThresholdPoint` gains `agree` / `n`; `ThresholdReport` gains `flipped` /
+  `margin` / `rationale_text` (empty for the existing `threshold_sweep`, which is
+  unchanged).
+- `improve` never bundles a threshold tuned on the old scores with criteria
+  edits: such a threshold is applied only to the threshold-only candidate, where
+  the criteria do not change.
+
 ## [0.8.0] - 2026-10-21
 
 Custom Eval calibration — library-side core. Additions only; existing
@@ -314,7 +348,8 @@ run = await evaluate_config(config, labeled_cases, "openai:gpt-4o-mini",
 - Initial release of the Eval AI Library with core functionality for evaluating
   RAG systems and AI agents.
 
-[Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.1
 [0.8.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.0
 [0.7.30]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.30
 [0.7.28]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.28

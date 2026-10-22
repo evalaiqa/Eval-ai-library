@@ -75,6 +75,8 @@ class ThresholdPoint(BaseModel):
     kappa: Optional[float] = None
     precision_fail: Optional[float] = None
     recall_fail: Optional[float] = None
+    agree: Optional[int] = None  # rows whose judge verdict matches the human label
+    n: Optional[int] = None  # rows scored
 
 
 class ThresholdReport(BaseModel):
@@ -84,6 +86,11 @@ class ThresholdReport(BaseModel):
     best: Optional[ThresholdPoint] = None
     current: Optional[ThresholdPoint] = None
     unstable: bool = False
+    # Plain-language explanation of a proposed threshold move (populated by
+    # threshold_sweep_run; empty for the plain threshold_sweep).
+    flipped: List[Dict[str, Any]] = Field(default_factory=list)
+    margin: Optional[float] = None
+    rationale_text: str = ""
     notes: List[str] = Field(default_factory=list)
 
 
@@ -418,6 +425,8 @@ def threshold_sweep(
                 round(m["precision_fail"], 4) if m["precision_fail"] is not None else None
             ),
             recall_fail=round(m["recall_fail"], 4) if m["recall_fail"] is not None else None,
+            agree=sum(1 for a, b in zip(human, judge) if a == b),
+            n=len(pairs),
         )
 
     curve = [point(t) for t in candidates]
@@ -459,6 +468,123 @@ def threshold_sweep(
         unstable=unstable,
         notes=notes,
     )
+
+
+def threshold_sweep_run(run: Any, current: float, objective: str = "accuracy") -> ThresholdReport:
+    """Tune the pass/fail threshold on an EvaluationRun's own scores.
+
+    ``run`` is any object exposing ``results`` with ``case_id`` / ``human_verdict``
+    / ``score`` per row (an ``EvaluationRun``) — kept duck-typed to avoid a import
+    cycle with the candidates module. Unlike :func:`threshold_sweep`, the threshold
+    moves only when it strictly gains at least one more agreeing row, and the
+    report carries a human-readable explanation (``flipped`` rows, ``margin`` to the
+    nearest score, ``rationale_text``).
+    """
+    pairs: List[Tuple[str, str, float]] = [
+        (r.case_id, r.human_verdict, r.score)
+        for r in run.results
+        if r.human_verdict is not None and r.score is not None
+    ]
+    if not pairs:
+        return ThresholdReport(objective=objective, notes=["no scored rows with a human label."])
+
+    n = len(pairs)
+    scores = sorted({s for _, _, s in pairs})
+    candidates = sorted(
+        {round((scores[i] + scores[i + 1]) / 2, 6) for i in range(len(scores) - 1)}
+        | {round(current, 6)}
+    )
+
+    def judge_at(t: float) -> Dict[str, str]:
+        return {cid: ("fail" if s < t else "pass") for cid, _, s in pairs}
+
+    def point(t: float) -> ThresholdPoint:
+        human = [h for _, h, _ in pairs]
+        judge = ["fail" if s < t else "pass" for _, _, s in pairs]
+        m = _binary_metrics(human, judge)
+        return ThresholdPoint(
+            threshold=t,
+            accuracy=round(m["accuracy"], 4),
+            kappa=m["kappa"],
+            precision_fail=(
+                round(m["precision_fail"], 4) if m["precision_fail"] is not None else None
+            ),
+            recall_fail=round(m["recall_fail"], 4) if m["recall_fail"] is not None else None,
+            agree=sum(1 for a, b in zip(human, judge) if a == b),
+            n=n,
+        )
+
+    curve = [point(t) for t in candidates]
+    current_point = point(current)
+
+    def obj(p: ThresholdPoint) -> float:
+        if objective == "kappa":
+            return p.kappa if p.kappa is not None else -1.0
+        return float(p.agree or 0)  # "accuracy" == agreeing-row count
+
+    best_val = max(obj(p) for p in curve)
+    best_p = min(
+        (p for p in curve if obj(p) == best_val),
+        key=lambda p: (abs(p.threshold - current), p.threshold),
+    )
+
+    # Move only on a strict gain of ≥1 agreeing row.
+    moved = (best_p.agree or 0) >= (current_point.agree or 0) + 1 and abs(
+        best_p.threshold - current
+    ) > 1e-9
+    best_point = best_p if moved else current_point
+    best_t = best_point.threshold
+
+    flipped: List[Dict[str, Any]] = []
+    if moved:
+        jcur, jbest = judge_at(current), judge_at(best_t)
+        for cid, h, s in pairs:
+            if jcur[cid] != jbest[cid]:
+                flipped.append(
+                    {
+                        "case_id": cid,
+                        "score": s,
+                        "human_verdict": h,
+                        "old_verdict": jcur[cid],
+                        "new_verdict": jbest[cid],
+                    }
+                )
+
+    margin = round(min(abs(best_t - s) for s in scores), 6) if scores else None
+    unstable = margin is not None and margin < 0.02
+    rationale_text = _threshold_rationale(
+        moved, best_t, current, best_point, current_point, n, flipped
+    )
+
+    return ThresholdReport(
+        objective=objective,
+        curve=curve,
+        best=best_point,
+        current=current_point,
+        unstable=unstable,
+        flipped=flipped,
+        margin=margin,
+        rationale_text=rationale_text,
+    )
+
+
+def _threshold_rationale(moved, best_t, current, best_point, current_point, n, flipped) -> str:
+    if not moved:
+        return (
+            f"Threshold stays at {current:.2f}: {current_point.agree} of {n} rows match your "
+            "labels, and no threshold matches at least one more."
+        )
+    gained = [f for f in flipped if f["new_verdict"] == f["human_verdict"]]
+    sentence = (
+        f"At {best_t:.2f}, {best_point.agree} of {n} rows match your labels "
+        f"(was {current_point.agree} at {current:.2f})."
+    )
+    if gained:
+        ids = ", ".join(str(f["case_id"]) for f in gained[:6])
+        sc = ", ".join(f"{f['score']:.2f}" for f in gained[:6])
+        verb = gained[0]["new_verdict"]
+        sentence += f" Rows {ids} (scores {sc}) become {verb}, as you labeled them."
+    return sentence
 
 
 # ── Public: criterion attribution ────────────────────────────────────────────
