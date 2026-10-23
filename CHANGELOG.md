@@ -10,6 +10,43 @@ summarised from their commit messages rather than written at release time.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-23
+
+Calibration keeps the user's threshold, learns from every label, and runs several
+rounds — fixing cases where AI calibration drifted the threshold to meaningless
+values or let conditional criteria drag good answers down. Additions only, but the
+CustomEval verdict prompt now offers a sixth verdict (see Changed).
+
+### Added
+- **`not_applicable` verdict.** `CustomEvalMetric` (verdict strategy) lets the judge
+  mark a conditional criterion ("If {{input}} …") `not_applicable` when its condition
+  does not hold; such criteria are dropped from the TCVA aggregation (like skipped
+  ones) and listed in `evaluation_log.not_applicable_criteria`. A row where every
+  criterion is `not_applicable` gets no verdict (`not_applicable_only`, excluded from
+  agreement). `direct` strategy is unchanged.
+- **`improve(..., keep_threshold=True)`** (default): candidate A (threshold only) is
+  not built, candidates are scored at the config's own threshold, and the analyst is
+  told to fit the criteria to that fixed threshold (with the verdict weights and TCVA
+  spelled out). `keep_threshold=False` restores 0.8.1 threshold tuning.
+- **`improve(..., max_rounds=3)`**: each round starts from the previous winner,
+  re-runs the analyst on the rows that still disagree, and keeps the best; it stops
+  when every comparable row agrees, a round gains under one row, `max_rounds` is hit,
+  or the budget runs out. `ImproveResult` gains `rounds` (a `RoundReport` each) and
+  `remaining` (case ids still disagreeing, with the judge's reason).
+- **`improve(..., rejudge=True)`** (default): the analyst analyses the "before" run
+  (the current config re-judging every labelled row) instead of the `judge_result`
+  stored with each label, so labels given on older metric versions are still usable.
+- `CaseEvalResult` now carries `reason` and `evaluation_log`, so a run result can
+  stand in for `LabeledCase.judge_result`.
+
+### Changed
+- The CustomEval **verdict judge prompt** now offers `not_applicable` (with an
+  instruction to use it only for an unmet conditional criterion). Prompts with no
+  conditional criteria are unaffected in practice; `direct` is unchanged.
+- The analyst no longer writes row-specific values (order numbers, codes, SKUs,
+  prices, dates) into proposed criteria: such a proposal is rejected with reason
+  "row-specific value" and reported in `rejected`.
+
 ## [0.8.1] - 2026-10-22
 
 Calibration now picks the best of several candidates and tunes the threshold on
@@ -348,7 +385,8 @@ run = await evaluate_config(config, labeled_cases, "openai:gpt-4o-mini",
 - Initial release of the Eval AI Library with core functionality for evaluating
   RAG systems and AI agents.
 
-[Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.2
 [0.8.1]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.1
 [0.8.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.0
 [0.7.30]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.7.30

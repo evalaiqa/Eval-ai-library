@@ -31,18 +31,20 @@ Placeholder / filtering rules apply to both strategies:
     - A criterion referencing an unknown placeholder is skipped.
     - If every criterion is filtered out, the metric returns score=0.
 """
+
 import asyncio
 import json
 import re
 from collections import Counter
-from statistics import mean as _mean, median as _median
-from typing import Dict, Any, List, Tuple, Optional
+from statistics import mean as _mean
+from statistics import median as _median
+from typing import Any, Dict, List, Optional, Tuple
+
+from eval_lib.few_shot import FEW_SHOT_DEFAULT_MAX_CHARS
+from eval_lib.llm_client import chat_complete
 from eval_lib.metric_pattern import MetricPattern
 from eval_lib.testcases_schema import EvalTestCase
-from eval_lib.llm_client import chat_complete
-from eval_lib.utils import score_agg, extract_json_block
-from eval_lib.few_shot import FEW_SHOT_DEFAULT_MAX_CHARS
-
+from eval_lib.utils import extract_json_block, score_agg
 
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 
@@ -75,6 +77,11 @@ VERDICT_WEIGHTS = {
 
 _ALLOWED_STRATEGIES = {"verdict", "direct"}
 _ALLOWED_AGGREGATIONS = {"majority", "median", "mean"}
+
+# A verdict the judge may use for a conditional criterion whose condition does
+# not hold for this input. not_applicable criteria are dropped from the
+# aggregation (like skipped criteria); they carry no weight.
+_NOT_APPLICABLE = "not_applicable"
 
 
 class CustomEvalMetric(MetricPattern):
@@ -143,9 +150,7 @@ class CustomEvalMetric(MetricPattern):
         )
 
         if not isinstance(evaluation_criteria, list) or len(evaluation_criteria) == 0:
-            raise ValueError(
-                "CustomEvalMetric requires a non-empty list of evaluation_criteria."
-            )
+            raise ValueError("CustomEvalMetric requires a non-empty list of evaluation_criteria.")
         cleaned = [str(c).strip() for c in evaluation_criteria if str(c).strip()]
         if not cleaned:
             raise ValueError(
@@ -246,20 +251,24 @@ class CustomEvalMetric(MetricPattern):
         for c in criteria:
             placeholders = cls._extract_placeholders(c)
             if not placeholders:
-                skipped.append({
-                    "criterion": c,
-                    "reason": "no_placeholders",
-                    "detail": "Criterion contains no {{placeholders}}; nothing to evaluate against.",
-                })
+                skipped.append(
+                    {
+                        "criterion": c,
+                        "reason": "no_placeholders",
+                        "detail": "Criterion contains no {{placeholders}}; nothing to evaluate against.",
+                    }
+                )
                 continue
             missing = [p for p in placeholders if p not in values]
             if missing:
-                skipped.append({
-                    "criterion": c,
-                    "reason": "unknown_placeholders",
-                    "detail": f"Criterion references unknown placeholder(s): {missing}",
-                    "missing": missing,
-                })
+                skipped.append(
+                    {
+                        "criterion": c,
+                        "reason": "unknown_placeholders",
+                        "detail": f"Criterion references unknown placeholder(s): {missing}",
+                        "missing": missing,
+                    }
+                )
                 continue
             kept.append(c)
         return kept, skipped
@@ -318,9 +327,7 @@ fully   – criterion fully satisfied"""
         few_shot_block: str = "",
     ) -> str:
         data_block = cls._build_data_block(used_names, values)
-        criteria_text = "\n".join(
-            f"{i+1}. {c}" for i, c in enumerate(kept_criteria)
-        )
+        criteria_text = "\n".join(f"{i+1}. {c}" for i, c in enumerate(kept_criteria))
         return f"""{cls._prompt_label_help()}{few_shot_block}
 
 DATA:
@@ -331,12 +338,14 @@ EVALUATION CRITERIA:
 
 Task: For EACH criterion above, decide how well it is satisfied by the DATA.
 The {{{{placeholders}}}} inside each criterion refer to entries in the DATA block.
-Use exactly one of: fully, mostly, partial, minor, none.
+Use exactly one of: fully, mostly, partial, minor, none, not_applicable.
+Use not_applicable ONLY when a criterion states a condition (for example "If ...")
+that this input does not meet; never use it to avoid judging.
 
 **
 Return JSON array with exactly {len(kept_criteria)} verdicts:
 [
-  {{"verdict": "fully|mostly|partial|minor|none", "reason": "<one sentence>"}},
+  {{"verdict": "fully|mostly|partial|minor|none|not_applicable", "reason": "<one sentence>"}},
   ...
 ]
 **
@@ -352,9 +361,7 @@ JSON:"""
         few_shot_block: str = "",
     ) -> str:
         data_block = cls._build_data_block(used_names, values)
-        criteria_text = "\n".join(
-            f"{i+1}. {c}" for i, c in enumerate(kept_criteria)
-        )
+        criteria_text = "\n".join(f"{i+1}. {c}" for i, c in enumerate(kept_criteria))
         return f"""You are evaluating how well the DATA satisfies the EVALUATION CRITERIA.{few_shot_block}
 
 DATA:
@@ -516,6 +523,61 @@ JSON:"""
         self.print_result(result)
         return result
 
+    def _all_not_applicable_result(
+        self,
+        test_case: EvalTestCase,
+        criteria: List[str],
+        kept: List[str],
+        skipped: List[Dict[str, Any]],
+        used_names: List[str],
+        values: Dict[str, Any],
+        final_verdicts: List[Dict[str, Any]],
+        not_applicable_criteria: List[Dict[str, Any]],
+        few_shot_log: Dict[str, Any],
+        total_cost: float,
+        truncation_warning: Optional[str],
+    ) -> Dict[str, Any]:
+        """Every kept criterion was not_applicable → the row has no verdict.
+
+        Flagged with ``not_applicable_only`` so the calibration layer excludes it
+        from agreement, exactly like an all-skipped row.
+        """
+        reason = "All criteria were not_applicable to this input; no score."
+        evaluation_log: Dict[str, Any] = {
+            "strategy": "verdict",
+            "n_runs": self.n_runs,
+            "aggregation": self.aggregation if self.n_runs > 1 else None,
+            "input_question": test_case.input,
+            "actual_output": test_case.actual_output,
+            "evaluation_criteria_template": list(self.evaluation_criteria),
+            "kept_criteria": kept,
+            "skipped_criteria": skipped,
+            "data_used": {name: values[name] for name in used_names},
+            "verdicts": final_verdicts,
+            "not_applicable_criteria": not_applicable_criteria,
+            "not_applicable_only": True,
+            "verdict_weights": {},
+            "final_score": 0.0,
+            "threshold": self.threshold,
+            "temperature": self.temperature,
+            "success": False,
+            "summary": reason,
+        }
+        if self.few_shot_examples:
+            evaluation_log["few_shot"] = few_shot_log
+        if truncation_warning:
+            evaluation_log["truncation_warning"] = truncation_warning
+        result = {
+            "name": self.name,
+            "score": 0.0,
+            "success": False,
+            "reason": reason,
+            "evaluation_cost": round(total_cost, 6),
+            "evaluation_log": evaluation_log,
+        }
+        self.print_result(result)
+        return result
+
     # ==================== STRATEGY: VERDICT ====================
 
     async def _evaluate_verdict_mode(
@@ -529,66 +591,124 @@ JSON:"""
         truncation_warning: Optional[str],
     ) -> Dict[str, Any]:
         few_shot_block, few_shot_log = self._render_few_shot("verdict")
-        runs = await asyncio.gather(*[
-            self._run_verdicts_once(kept, used_names, values, few_shot_block)
-            for _ in range(self.n_runs)
-        ])
+        runs = await asyncio.gather(
+            *[
+                self._run_verdicts_once(kept, used_names, values, few_shot_block)
+                for _ in range(self.n_runs)
+            ]
+        )
         # runs: List[(verdicts, cost)]
         total_cost = sum(r[1] for r in runs)
         run_verdicts = [r[0] for r in runs]
 
         per_run_detail: Optional[List[Dict[str, Any]]] = None
 
+        # not_applicable verdicts are dropped from the aggregation (they carry no
+        # weight); weights_by_index maps a scored criterion index to its weight.
+        na_indices: List[int] = []
+        weights_by_index: Dict[int, float] = {}
+
         if self.n_runs == 1:
             final_verdicts = run_verdicts[0]
-            aggregated_weights = [
-                VERDICT_WEIGHTS.get(v.get("verdict", "none"), 0.0)
-                for v in final_verdicts
-            ]
+            for i, v in enumerate(final_verdicts):
+                lbl = v.get("verdict", "none")
+                if lbl == _NOT_APPLICABLE:
+                    na_indices.append(i)
+                    continue
+                weights_by_index[i] = VERDICT_WEIGHTS.get(lbl, 0.0)
         else:
             final_verdicts = []
-            aggregated_weights = []
             per_run_detail = []
             for i in range(len(kept)):
                 labels = [rv[i].get("verdict", "none") for rv in run_verdicts]
                 counter = Counter(labels)
                 mode_label, mode_votes = counter.most_common(1)[0]
 
+                if mode_label == _NOT_APPLICABLE:
+                    na_indices.append(i)
+                    final_verdicts.append(
+                        {
+                            "verdict": _NOT_APPLICABLE,
+                            "reason": f"Majority not_applicable {mode_votes}/{self.n_runs} across runs.",
+                        }
+                    )
+                    per_run_detail.append(
+                        {
+                            "criterion_index": i,
+                            "per_run_verdicts": labels,
+                            "aggregated_verdict": _NOT_APPLICABLE,
+                            "aggregated_weight": None,
+                        }
+                    )
+                    continue
+
+                scored_labels = [l for l in labels if l != _NOT_APPLICABLE]
                 if self.aggregation == "majority":
                     weight = VERDICT_WEIGHTS.get(mode_label, 0.0)
-                    final_verdicts.append({
-                        "verdict": mode_label,
-                        "reason": f"Majority vote {mode_votes}/{self.n_runs} across runs.",
-                    })
+                    final_verdicts.append(
+                        {
+                            "verdict": mode_label,
+                            "reason": f"Majority vote {mode_votes}/{self.n_runs} across runs.",
+                        }
+                    )
                 else:
-                    weights = [VERDICT_WEIGHTS.get(l, 0.0) for l in labels]
+                    weights = [VERDICT_WEIGHTS.get(l, 0.0) for l in scored_labels] or [0.0]
                     if self.aggregation == "median":
                         weight = float(_median(weights))
                     else:  # mean
                         weight = float(_mean(weights))
-                    final_verdicts.append({
-                        "verdict": mode_label,
-                        "reason": (
-                            f"{self.aggregation.capitalize()} weight={round(weight, 3)} "
-                            f"across {self.n_runs} runs (mode verdict shown)."
-                        ),
-                    })
-                aggregated_weights.append(weight)
-                per_run_detail.append({
-                    "criterion_index": i,
-                    "per_run_verdicts": labels,
-                    "aggregated_verdict": final_verdicts[-1]["verdict"],
-                    "aggregated_weight": round(weight, 4),
-                })
+                    final_verdicts.append(
+                        {
+                            "verdict": mode_label,
+                            "reason": (
+                                f"{self.aggregation.capitalize()} weight={round(weight, 3)} "
+                                f"across {self.n_runs} runs (mode verdict shown)."
+                            ),
+                        }
+                    )
+                weights_by_index[i] = weight
+                per_run_detail.append(
+                    {
+                        "criterion_index": i,
+                        "per_run_verdicts": labels,
+                        "aggregated_verdict": final_verdicts[-1]["verdict"],
+                        "aggregated_weight": round(weight, 4),
+                    }
+                )
+
+        not_applicable_criteria = [
+            {"criterion": kept[i], "reason": final_verdicts[i].get("reason", "")}
+            for i in na_indices
+        ]
+        aggregated_weights = [weights_by_index[i] for i in sorted(weights_by_index)]
+
+        if not aggregated_weights:
+            # Every criterion was not_applicable → no verdict for this row.
+            return self._all_not_applicable_result(
+                test_case,
+                criteria,
+                kept,
+                skipped,
+                used_names,
+                values,
+                final_verdicts,
+                not_applicable_criteria,
+                few_shot_log,
+                total_cost,
+                truncation_warning,
+            )
 
         final_score = round(score_agg(aggregated_weights, temperature=self.temperature), 4)
         success = final_score >= self.threshold
 
-        positive = [v for v in final_verdicts if v.get("verdict") in ("fully", "mostly")]
-        negative = [v for v in final_verdicts if v.get("verdict") in ("none", "minor", "partial")]
-        total = len(final_verdicts)
+        scored_verdicts = [v for i, v in enumerate(final_verdicts) if i not in set(na_indices)]
+        positive = [v for v in scored_verdicts if v.get("verdict") in ("fully", "mostly")]
+        negative = [v for v in scored_verdicts if v.get("verdict") in ("none", "minor", "partial")]
+        total = len(scored_verdicts)
         if total > 0 and len(positive) >= total * 0.7:
-            summary = f"Strong performance: {len(positive)}/{total} criteria fully or mostly satisfied."
+            summary = (
+                f"Strong performance: {len(positive)}/{total} criteria fully or mostly satisfied."
+            )
         elif total > 0 and len(negative) >= total * 0.7:
             summary = f"Weak performance: {len(negative)}/{total} criteria not satisfied or minimally addressed."
         else:
@@ -610,7 +730,7 @@ JSON:"""
             "comment_data_used": "Subset of resolved values that appeared in at least one kept criterion (the DATA block shown to the judge).",
             "verdicts": final_verdicts,
             "comment_verdicts": "Per-criterion verdicts (aggregated across runs if n_runs>1).",
-            "verdict_weights": {i: aggregated_weights[i] for i in range(len(aggregated_weights))},
+            "verdict_weights": {i: weights_by_index[i] for i in sorted(weights_by_index)},
             "final_score": final_score,
             "comment_final_score": f"TCVA aggregation of verdict weights (temperature={self.temperature}).",
             "threshold": self.threshold,
@@ -623,6 +743,11 @@ JSON:"""
             evaluation_log["comment_per_run_detail"] = (
                 f"Individual verdicts from each of the {self.n_runs} runs before "
                 f"{self.aggregation} aggregation."
+            )
+        if not_applicable_criteria:
+            evaluation_log["not_applicable_criteria"] = not_applicable_criteria
+            evaluation_log["comment_not_applicable_criteria"] = (
+                "Criteria whose condition did not apply to this input; dropped from the score."
             )
         if self.few_shot_examples:
             evaluation_log["few_shot"] = few_shot_log
@@ -653,10 +778,12 @@ JSON:"""
         truncation_warning: Optional[str],
     ) -> Dict[str, Any]:
         few_shot_block, few_shot_log = self._render_few_shot("direct")
-        runs = await asyncio.gather(*[
-            self._run_direct_once(kept, used_names, values, few_shot_block)
-            for _ in range(self.n_runs)
-        ])
+        runs = await asyncio.gather(
+            *[
+                self._run_direct_once(kept, used_names, values, few_shot_block)
+                for _ in range(self.n_runs)
+            ]
+        )
         # runs: List[(raw_score_0_10, reason, cost)]
         raw_scores = [r[0] for r in runs]
         reasons = [r[1] for r in runs]

@@ -42,6 +42,10 @@ class CaseEvalResult(BaseModel):
     judge_verdict: Optional[str] = None  # None == excluded (no verdict)
     score: Optional[float] = None
     success: Optional[bool] = None
+    reason: Optional[str] = None
+    # Full evaluate() log (per-criterion verdicts, kept/skipped/not_applicable), so a
+    # run result can stand in for LabeledCase.judge_result when the analyst rejudges.
+    evaluation_log: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
 
@@ -241,6 +245,8 @@ async def evaluate_config(
                 res = await metric.evaluate(tc)
                 out.score = res.get("score")
                 out.success = res.get("success")
+                out.reason = res.get("reason")
+                out.evaluation_log = res.get("evaluation_log")
                 out.judge_verdict = _verdict_from_result(res)
             except BudgetExceeded as e:
                 stopped = True
@@ -259,15 +265,17 @@ async def evaluate_config(
     scored_cases = []
     for c in cases:
         r = by_id[c.id]
-        jr = (
-            {"error": r.error}
-            if r.error
-            else {
+        if r.error:
+            jr: Dict[str, Any] = {"error": r.error}
+        elif r.judge_verdict is None:
+            # excluded (all-skipped or all not_applicable) ⇒ no verdict for agreement
+            jr = {"score": r.score, "success": r.success, "evaluation_log": {"kept_criteria": []}}
+        else:
+            jr = {
                 "score": r.score,
                 "success": r.success,
                 "evaluation_log": {"kept_criteria": ["_"]},  # non-empty ⇒ counts as a verdict
             }
-        )
         scored_cases.append(c.model_copy(update={"judge_result": jr}))
     report = agreement(scored_cases)
 
@@ -282,6 +290,8 @@ async def evaluate_config(
 
 def _verdict_from_result(res: Dict[str, Any]) -> Optional[str]:
     log = res.get("evaluation_log") or {}
+    if log.get("not_applicable_only"):
+        return None
     if "kept_criteria" in log and len(log.get("kept_criteria") or []) == 0:
         return None
     success = res.get("success")

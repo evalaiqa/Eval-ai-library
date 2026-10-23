@@ -38,6 +38,7 @@ from eval_lib.calibration.estimate import (
 from eval_lib.calibration.improve import (
     CandidateReport,
     ImproveResult,
+    RoundReport,
     improve,
 )
 from eval_lib.calibration.models import (
@@ -112,6 +113,7 @@ __all__ = [
     # Small-set improve
     "improve",
     "ImproveResult",
+    "RoundReport",
     "CandidateReport",
     # Budget
     "Budget",

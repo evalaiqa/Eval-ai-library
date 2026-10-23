@@ -113,6 +113,8 @@ def _judge_verdict(case: Any) -> Optional[str]:
     if jr.get("error"):
         return None
     log = jr.get("evaluation_log") or {}
+    if log.get("not_applicable_only"):
+        return None  # every criterion not_applicable → no verdict
     if "kept_criteria" in log and len(log.get("kept_criteria") or []) == 0:
         return None  # every criterion skipped → n/a
     success = jr.get("success")

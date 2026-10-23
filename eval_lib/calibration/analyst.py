@@ -115,6 +115,7 @@ class CalibrationAnalyst:
         cases: Optional[List[str]] = None,
         budget: Optional[Budget] = None,
         on_progress: Optional[Callable[[str, int, int], None]] = None,
+        threshold_target: Optional[float] = None,
     ) -> AnalysisResult:
         budget = budget if budget is not None else Budget()
         budgeted = _BudgetedModel(self.model, budget)
@@ -139,7 +140,7 @@ class CalibrationAnalyst:
             )
 
         attribution = criterion_attribution(selected)
-        context = self._map_context(config, attribution, contrast_ids)
+        context = self._map_context(config, attribution, contrast_ids, threshold_target)
 
         # 2. Map: diagnose in batches, bounded concurrency.
         batches = [
@@ -186,7 +187,7 @@ class CalibrationAnalyst:
         rejected: List[Dict[str, Any]] = []
         if not stopped and findings:
             try:
-                raw = await self._propose(findings, config, budgeted)
+                raw = await self._propose(findings, config, budgeted, threshold_target)
             except BudgetExceeded:
                 stopped = True
                 raw = []
@@ -294,7 +295,13 @@ class CalibrationAnalyst:
         return max(items, key=lambda kv: (kv[1], -kv[0]))[0]
 
     # ── prompts ──────────────────────────────────────────────────────────────
-    def _map_context(self, config: CustomEvalConfig, attribution, contrast_ids: List[str]) -> str:
+    def _map_context(
+        self,
+        config: CustomEvalConfig,
+        attribution,
+        contrast_ids: List[str],
+        threshold_target: Optional[float] = None,
+    ) -> str:
         crit = "\n".join(f"{i}. {c}" for i, c in enumerate(config.evaluation_criteria))
         stats_lines = []
         for cs in attribution:
@@ -305,11 +312,17 @@ class CalibrationAnalyst:
             )
         stats = "\n".join(stats_lines) if stats_lines else "(no per-criterion stats)"
         causes = ", ".join(sorted(CAUSES))
+        target = (
+            f"\n{_threshold_target_text(threshold_target)}\n"
+            if threshold_target is not None
+            else ""
+        )
         return (
             "You are calibrating an LLM judge against human labels. For each case below, say WHY the "
             "judge disagreed (or agreed) with the human, choosing exactly one cause.\n\n"
             f"CONFIG: strategy={config.strategy}, temperature={config.temperature}, "
             f"threshold={config.threshold}\n"
+            f"{target}"
             f"CRITERIA (0-indexed):\n{crit}\n\n"
             f"PER-CRITERION STATS:\n{stats}\n\n"
             f"CAUSES (choose one per case): {causes}\n"
@@ -381,7 +394,11 @@ class CalibrationAnalyst:
         return findings
 
     async def _propose(
-        self, findings: List[Finding], config: CustomEvalConfig, budgeted
+        self,
+        findings: List[Finding],
+        config: CustomEvalConfig,
+        budgeted,
+        threshold_target: Optional[float] = None,
     ) -> List[dict]:
         crit = "\n".join(f"{i}. {c}" for i, c in enumerate(config.evaluation_criteria))
         fblock = "\n".join(
@@ -389,10 +406,20 @@ class CalibrationAnalyst:
             f"count={f.count}, title={f.title}"
             for f in findings
         )
+        threshold_rule = (
+            _threshold_target_text(threshold_target)
+            if threshold_target is not None
+            else "Do NOT propose a threshold (it is tuned separately)."
+        )
         prompt = (
             "Propose concrete edits to make the judge match the humans. Keep every criterion wording "
             "in the SAME language as the existing criteria. Each new/rewritten criterion MUST reference "
-            "data via {{placeholders}}. Do NOT propose a threshold (it is tuned separately).\n\n"
+            f"data via {{{{placeholders}}}}. {threshold_rule}\n"
+            'You may use conditional criteria ("If {{input}} ..."): the judge marks them not_applicable '
+            "when the condition does not hold and drops them from the score, so they never penalise "
+            "unrelated inputs.\n"
+            "Criteria must describe a KIND of behaviour, never a specific row: do not copy order "
+            "numbers, codes, SKUs, prices, dates or names from the data into a criterion.\n\n"
             f"CRITERIA (0-indexed):\n{crit}\n\nFINDINGS:\n{fblock}\n\n"
             'Return ONLY JSON: {"proposals": [{"kind": "rewrite_criterion|add_criterion|remove_criterion'
             '|split_criterion|set_temperature|set_strategy|add_few_shot|review_labels", '
@@ -499,6 +526,7 @@ class CalibrationAnalyst:
     ) -> Tuple[List[Proposal], List[Dict[str, Any]]]:
         available = self._available_placeholders(cs, train)
         train_ids = {c.id for c in train}
+        row_corpus = self._row_corpus(train)
         accepted: List[Proposal] = []
         rejected: List[Dict[str, Any]] = []
         n_criteria = len(config.evaluation_criteria)
@@ -525,7 +553,7 @@ class CalibrationAnalyst:
                     }
                 )
                 continue
-            reason = self._reject_reason(p, available, existing, n_criteria, train_ids)
+            reason = self._reject_reason(p, available, existing, n_criteria, train_ids, row_corpus)
             if reason:
                 rejected.append({"proposal": p.model_dump(mode="json"), "reason": reason})
                 continue
@@ -543,7 +571,7 @@ class CalibrationAnalyst:
         return accepted, rejected
 
     def _reject_reason(
-        self, p: Proposal, available, existing, n_criteria, train_ids
+        self, p: Proposal, available, existing, n_criteria, train_ids, row_corpus: str = ""
     ) -> Optional[str]:
         if p.kind in _INDEX_KINDS and (p.criterion_index is None):
             return "missing criterion_index"
@@ -556,6 +584,9 @@ class CalibrationAnalyst:
                 return f"criterion references unknown placeholders {sorted(missing)}"
             if text in existing:
                 return f"duplicate criterion: {text!r}"
+            hit = _row_specific_hit(text, row_corpus)
+            if hit:
+                return f"row-specific value: {hit!r}"
         added = len(self._new_texts(p)) - (1 if p.kind == "split_criterion" else 0)
         if p.kind in ("add_criterion", "split_criterion") and n_criteria + added > 50:
             return "would exceed the 50-criteria limit"
@@ -581,6 +612,21 @@ class CalibrationAnalyst:
             if c.test_case.extra_fields:
                 avail.update(c.test_case.extra_fields.keys())
         return avail
+
+    @staticmethod
+    def _row_corpus(train: List[LabeledCase]) -> str:
+        """All labelled-row text (input / output / expected / extra fields), joined —
+        used to catch row-specific values copied into a proposed criterion."""
+        parts: List[str] = []
+        for c in train:
+            tc = c.test_case
+            parts.append(tc.input or "")
+            parts.append(tc.actual_output or "")
+            if tc.expected_output:
+                parts.append(tc.expected_output)
+            for v in (tc.extra_fields or {}).values():
+                parts.append(v if isinstance(v, str) else str(v))
+        return "\n".join(parts)
 
     def _threshold_proposal(
         self, selected: List[LabeledCase], config: CustomEvalConfig
@@ -670,6 +716,34 @@ class CalibrationAnalyst:
 
 # ── module helpers ───────────────────────────────────────────────────────────
 _PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+
+# Tokens that look like a specific row's value, not a kind of behaviour.
+_ROW_SPECIFIC_RES = [
+    re.compile(r"ORD-\d+"),
+    re.compile(r"\b[A-Z]{3,}\d+\b"),
+    re.compile(r"\$\d+(?:[.,]\d+)?"),
+    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+]
+
+
+def _threshold_target_text(threshold: float) -> str:
+    return (
+        f"KEEP THE THRESHOLD FIXED at {threshold}: fit the criteria to it, never move it. "
+        "A good answer must score at least this, a bad one below it. Verdict weights are "
+        "fully=1.0, mostly=0.9, partial=0.7, minor=0.3, none=0.0 (not_applicable is dropped); the "
+        "final score is a temperature-controlled power mean (TCVA) of the kept weights, so a good "
+        f"answer's criteria must mostly land fully/mostly to clear {threshold}."
+    )
+
+
+def _row_specific_hit(text: str, corpus: str) -> Optional[str]:
+    """Return a token in ``text`` that looks like an identifier/value AND appears
+    verbatim in a labelled row (``corpus``), else None."""
+    for rx in _ROW_SPECIFIC_RES:
+        for tok in rx.findall(text or ""):
+            if tok and tok in corpus:
+                return str(tok)
+    return None
 
 
 def _placeholders(text: str) -> List[str]:
