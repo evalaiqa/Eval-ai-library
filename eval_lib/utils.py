@@ -2,6 +2,7 @@
 Utility functions for metrics evaluation
 """
 import re
+import ast
 import json
 from typing import List
 import math
@@ -167,14 +168,66 @@ def _try_fix_escaped_quotes(text: str) -> str:
     return text
 
 
+def _strip_json_comments(text: str) -> str:
+    """Remove ``//`` line comments and ``/* ... */`` block comments that sit
+    outside double-quoted strings.
+
+    Some models wrap verdict JSON in comments (``"verdict": "yes", // supported``
+    or ``/* ... */``). Stripping them only outside strings keeps real content
+    intact: a URL (``http://x.io``) or a literal ``/* ... */`` inside a value is
+    untouched, and backslash escapes are respected so an escaped quote (``\\"``)
+    does not end the enclosing string early.
+    """
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    escape = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            # Line comment: drop to end of line, keep the newline itself.
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            # Block comment: drop through the closing */ (if any).
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _repair_and_parse(candidate: str):
     """Try to turn a JSON-ish candidate into valid JSON.
 
     Runs the known repairs (trailing-comma removal, value-level escaped quotes,
-    truncation closing) in order, including on their combination, and returns
-    the first variant that `json.loads` accepts. Returns ``None`` when no
-    variant parses, so callers can fall through to the next extraction
-    strategy instead of handing back un-parseable text.
+    truncation closing, comment stripping) in order, including on their
+    combination, and returns the first variant that `json.loads` accepts. As a
+    last resort it tries `ast.literal_eval` for Python-literal-shaped replies
+    (single quotes, `True`/`False`/`None`) and re-serialises a dict/list back to
+    JSON. Returns ``None`` when nothing parses, so callers can fall through to
+    the next extraction strategy instead of handing back un-parseable text.
 
     This is applied to every candidate `extract_json_block` extracts (markdown
     block, regex-matched object/array), not just the whole raw text — otherwise
@@ -182,6 +235,7 @@ def _repair_and_parse(candidate: str):
     failure that crashes `json.loads` downstream) is never repaired.
     """
     candidate = candidate.strip()
+    no_comments = _strip_json_comments(candidate)
     variants = [
         candidate,
         _sanitize_json_string(candidate),
@@ -189,6 +243,8 @@ def _repair_and_parse(candidate: str):
         _sanitize_json_string(_try_fix_escaped_quotes(candidate)),
         _try_fix_truncated_json(candidate),
         _try_fix_truncated_json(_sanitize_json_string(candidate)),
+        no_comments,
+        _sanitize_json_string(no_comments),
     ]
     for variant in variants:
         try:
@@ -196,6 +252,17 @@ def _repair_and_parse(candidate: str):
             return variant
         except Exception:
             continue
+
+    # Last resort: a Python-literal-shaped reply (single quotes, True/False/None).
+    # ast.literal_eval only evaluates literals (no code execution). Trailing
+    # commas are stripped first; only a dict/list is accepted, so a bare string
+    # or number extracted from prose is not mistaken for JSON.
+    try:
+        obj = ast.literal_eval(_sanitize_json_string(no_comments))
+        if isinstance(obj, (dict, list)):
+            return json.dumps(obj, ensure_ascii=False)
+    except Exception:
+        pass
     return None
 
 

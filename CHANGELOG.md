@@ -10,7 +10,19 @@ summarised from their commit messages rather than written at release time.
 
 ## [Unreleased]
 
-## [0.8.3] - 2026-11-03
+## [0.8.4] - 2026-11-03
+
+### Fixed
+- **`extract_json_block` now also parses single-quoted JSON and JSON with
+  comments.** Building on 0.8.3, `_repair_and_parse` strips `//` and `/* */`
+  comments that sit outside strings (a URL or a `/* */` marker inside a value is
+  left untouched, and escapes are respected), and as a last resort reads a
+  Python-literal-shaped reply — single quotes, `True`/`False`/`None` — with
+  `ast.literal_eval`, re-serialising a dict/list back to JSON. This covers the
+  remaining `FaithfulnessMetric` crash where the judge returned a Python literal
+  or a commented array with clean (quote-less) framing. A genuinely malformed
+  reply (e.g. a missing comma between fields) still fails to parse: the repair
+  invents nothing.
 
 ### Fixed
 - **`extract_json_block` no longer hands back un-parseable text that crashes the
@@ -399,6 +411,7 @@ run = await evaluate_config(config, labeled_cases, "openai:gpt-4o-mini",
   RAG systems and AI agents.
 
 [Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.2...HEAD
+[0.8.4]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.4
 [0.8.3]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.3
 [0.8.2]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.2
 [0.8.1]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.1
