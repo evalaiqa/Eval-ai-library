@@ -10,6 +10,19 @@ summarised from their commit messages rather than written at release time.
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-03
+
+### Fixed
+- **`extract_json_block` no longer hands back un-parseable text that crashes the
+  caller.** The JSON repairs (trailing-comma removal, value-level escaped quotes,
+  truncation closing) were only applied to the whole raw response, never to a JSON
+  candidate pulled out of surrounding prose or a ```json code block. A judge reply
+  with leading prose and a trailing comma (e.g. a pretty-printed verdict array) fell
+  through every repair and returned as-is, so the caller's `json.loads` raised
+  `JSONDecodeError` and crashed the whole eval row (seen in production as
+  `FaithfulnessMetric` crashing with "Expecting property name enclosed in double
+  quotes"). Every extraction path now runs the full repair pipeline on its candidate.
+
 ## [0.8.2] - 2026-10-23
 
 Calibration keeps the user's threshold, learns from every label, and runs several
@@ -386,6 +399,7 @@ run = await evaluate_config(config, labeled_cases, "openai:gpt-4o-mini",
   RAG systems and AI agents.
 
 [Unreleased]: https://github.com/meshkovQA/Eval-ai-library/compare/v0.8.2...HEAD
+[0.8.3]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.3
 [0.8.2]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.2
 [0.8.1]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.1
 [0.8.0]: https://github.com/meshkovQA/Eval-ai-library/releases/tag/v0.8.0

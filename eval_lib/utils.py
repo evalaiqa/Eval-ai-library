@@ -167,6 +167,38 @@ def _try_fix_escaped_quotes(text: str) -> str:
     return text
 
 
+def _repair_and_parse(candidate: str):
+    """Try to turn a JSON-ish candidate into valid JSON.
+
+    Runs the known repairs (trailing-comma removal, value-level escaped quotes,
+    truncation closing) in order, including on their combination, and returns
+    the first variant that `json.loads` accepts. Returns ``None`` when no
+    variant parses, so callers can fall through to the next extraction
+    strategy instead of handing back un-parseable text.
+
+    This is applied to every candidate `extract_json_block` extracts (markdown
+    block, regex-matched object/array), not just the whole raw text — otherwise
+    a response with leading prose plus a trailing comma (the common LLM judge
+    failure that crashes `json.loads` downstream) is never repaired.
+    """
+    candidate = candidate.strip()
+    variants = [
+        candidate,
+        _sanitize_json_string(candidate),
+        _try_fix_escaped_quotes(candidate),
+        _sanitize_json_string(_try_fix_escaped_quotes(candidate)),
+        _try_fix_truncated_json(candidate),
+        _try_fix_truncated_json(_sanitize_json_string(candidate)),
+    ]
+    for variant in variants:
+        try:
+            json.loads(variant)
+            return variant
+        except Exception:
+            continue
+    return None
+
+
 def _try_fix_truncated_json(text: str) -> str:
     """Attempt to fix truncated JSON by closing open brackets/braces."""
     open_brackets = 0
@@ -240,54 +272,28 @@ def extract_json_block(text: str) -> str:
     # Try to extract from markdown code blocks
     match = re.search(r"```json\s*(.*?)```", text, re.DOTALL)
     if match:
-        candidate = match.group(1).strip()
-        try:
-            json.loads(candidate)
-            return candidate
-        except Exception:
-            fixed = _try_fix_truncated_json(candidate)
-            try:
-                json.loads(fixed)
-                return fixed
-            except Exception:
-                pass
+        repaired = _repair_and_parse(match.group(1))
+        if repaired is not None:
+            return repaired
 
-    # Try to parse as direct JSON
-    sanitized = _sanitize_json_string(text)
-    try:
-        obj = json.loads(sanitized)
-        return json.dumps(obj, ensure_ascii=False)
-    except Exception:
-        pass
-
-    # Try fixing escaped quotes (common GPT-4.1 issue: \"value\" instead of "value")
-    fixed_quotes = _try_fix_escaped_quotes(text)
-    if fixed_quotes != text:
-        return fixed_quotes
+    # Try to parse the whole text as direct JSON (after repairs)
+    repaired = _repair_and_parse(text)
+    if repaired is not None:
+        return repaired
 
     # Try to find JSON object/array pattern (greedy to capture full nested structures)
     json_match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
     if json_match:
-        candidate = json_match.group(1).strip()
-        try:
-            json.loads(candidate)
-            return candidate
-        except Exception:
-            # Try fixing escaped quotes in the candidate
-            fixed = _try_fix_escaped_quotes(candidate)
-            if fixed != candidate:
-                return fixed
+        repaired = _repair_and_parse(json_match.group(1))
+        if repaired is not None:
+            return repaired
 
-    # Try to find start of JSON and fix truncation
+    # Try to find start of JSON and fix truncation from there
     json_start = re.search(r"[\[{]", text)
     if json_start:
-        candidate = text[json_start.start():].strip()
-        fixed = _try_fix_truncated_json(candidate)
-        try:
-            json.loads(fixed)
-            return fixed
-        except Exception:
-            pass
+        repaired = _repair_and_parse(text[json_start.start():])
+        if repaired is not None:
+            return repaired
 
     # Return as-is if nothing found
     return text.strip()
